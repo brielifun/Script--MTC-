@@ -1,0 +1,1768 @@
+-- =====================================================
+--  brieli vis — MTC WH Edition (v5 + Anti-Hiss + Drone Range)
+--  Правый Shift — открыть/закрыть меню
+-- =====================================================
+
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local Workspace         = game:GetService("Workspace")
+local TweenService      = game:GetService("TweenService")
+local HttpService       = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+
+if _G.brieliVisUnload then pcall(_G.brieliVisUnload) end
+
+-- ============== ФАЙЛЫ ==============
+local CONFIG_FILE = "brieli_vis_mtc_wh.json"
+local function fsWrite(n,c) if writefile then pcall(writefile,n,c) elseif write_file then pcall(write_file,n,c) end end
+local function fsRead(n)
+    if isfile then local ok,e=pcall(isfile,n) if ok and e then local ok2,d=pcall(readfile,n) if ok2 then return d end end
+    elseif read_file then local ok,d=pcall(read_file,n) if ok and d then return d end end
+    return nil
+end
+local function fsDelete(n) if delfile then pcall(delfile,n) elseif del_file then pcall(del_file,n) end end
+
+-- ============== CHECK ==============
+local drawingOk = pcall(function() local t=Drawing.new("Text") t:Remove() return true end)
+if not drawingOk then return warn("[brieli vis] Drawing API недоступен.") end
+
+-- ============== КОНСТАНТЫ ==============
+local DRONE_MAX_RANGE = 4286  -- 1.2 км в Roblox studs
+
+-- ============== STATE ==============
+local state = {
+    pTeam = {
+        enabled=false, showName=false, showDistance=false, showHealth=false,
+        showBox=false, showOutline=false,
+        color=Color3.fromRGB(60,200,100), maxDist=800,
+    },
+    pEnemy = {
+        enabled=false, showName=false, showDistance=false, showHealth=false,
+        showBox=false, showOutline=false,
+        color=Color3.fromRGB(255,60,60), maxDist=800,
+    },
+    playerTab = "team",
+
+    vEnabled        = false,
+    vOnlyEnemy      = false,
+    vHideOwn        = false,
+    vShowName       = false,
+    vShowDistance   = false,
+    vShowOutline    = false,
+    vMaxDistance    = 1000,
+    vColorEnemy     = Color3.fromRGB(255,60,60),
+    vColorAlly      = Color3.fromRGB(60,150,255),
+
+    trajEnabled     = false,
+
+    -- Anti-Hiss
+    antiHissEnabled = false,
+    antiHissConns   = {},
+    antiHissHidden  = {},
+    antiHissLoop    = nil,
+
+    -- Drone range (только вкл/выкл)
+    droneRangeEnabled = false,
+
+    menuKey             = Enum.KeyCode.RightShift,
+    configAccent        = nil,
+    configBgImage       = "",
+    configBgImageEnabled = false,
+    configBgImageTransparency = 0.55,
+
+    teamDrawings    = {},
+    enemyDrawings   = {},
+    vehicleDrawings = {},
+    trajLines       = {},
+    trajImpact      = nil,
+    droneRangeText  = nil,
+    vehicleCache    = {},
+    vehicleCacheTime = 0,
+    connections     = {},
+    renderConn      = nil,
+    unloaded        = false,
+    currentTab      = "visuals",
+    tabSwitching    = false,
+    loadingConfig   = false,
+}
+
+local function bind(c) table.insert(state.connections,c) return c end
+
+-- ============== ПАЛИТРА ==============
+local C = {
+    bg=Color3.fromRGB(13,16,21), topbar=Color3.fromRGB(17,21,27),
+    sidebar=Color3.fromRGB(17,21,27), panelBg=Color3.fromRGB(20,25,31),
+    row=Color3.fromRGB(21,26,33), rowHover=Color3.fromRGB(28,34,43),
+    tabActive=Color3.fromRGB(24,40,54), tabHover=Color3.fromRGB(22,28,36),
+    accent=Color3.fromRGB(0,200,255), accentDim=Color3.fromRGB(0,130,170),
+    text=Color3.fromRGB(220,228,240), textDim=Color3.fromRGB(115,128,145),
+    textMute=Color3.fromRGB(80,92,105), track=Color3.fromRGB(38,46,58),
+    border=Color3.fromRGB(28,34,43),
+}
+
+local function colorToTable(c) return {R=math.floor(c.R*255+.5),G=math.floor(c.G*255+.5),B=math.floor(c.B*255+.5)} end
+local function colorFromTable(t) if not t or type(t)~="table" then return nil end return Color3.fromRGB(t.R or 255,t.G or 255,t.B or 255) end
+
+-- ============== КОНФИГ ==============
+local function buildConfig()
+    return {
+        pTeam = { enabled=state.pTeam.enabled, showName=state.pTeam.showName, showDistance=state.pTeam.showDistance,
+                  showHealth=state.pTeam.showHealth, showBox=state.pTeam.showBox, showOutline=state.pTeam.showOutline,
+                  color=colorToTable(state.pTeam.color), maxDist=state.pTeam.maxDist },
+        pEnemy = { enabled=state.pEnemy.enabled, showName=state.pEnemy.showName, showDistance=state.pEnemy.showDistance,
+                   showHealth=state.pEnemy.showHealth, showBox=state.pEnemy.showBox, showOutline=state.pEnemy.showOutline,
+                   color=colorToTable(state.pEnemy.color), maxDist=state.pEnemy.maxDist },
+        playerTab = state.playerTab,
+        vEnabled = state.vEnabled, vOnlyEnemy = state.vOnlyEnemy, vHideOwn = state.vHideOwn,
+        vShowName = state.vShowName, vShowDistance = state.vShowDistance, vShowOutline = state.vShowOutline,
+        vMaxDistance = state.vMaxDistance,
+        vColorEnemy = colorToTable(state.vColorEnemy), vColorAlly = colorToTable(state.vColorAlly),
+        trajEnabled = state.trajEnabled,
+        antiHissEnabled = state.antiHissEnabled,
+        droneRangeEnabled = state.droneRangeEnabled,
+        menuKeyName = state.menuKey and state.menuKey.Name or "RightShift",
+        configAccent = state.configAccent and colorToTable(state.configAccent) or nil,
+        configBgImage = state.configBgImage,
+        configBgImageEnabled = state.configBgImageEnabled,
+        configBgImageTransparency = state.configBgImageTransparency,
+    }
+end
+local function saveConfig()
+    local ok, enc = pcall(function() return HttpService:JSONEncode(buildConfig()) end)
+    if ok and enc then fsWrite(CONFIG_FILE, enc) end
+end
+local function loadConfigTable()
+    local d = fsRead(CONFIG_FILE)
+    if not d or d == "" then return nil end
+    local ok, dec = pcall(function() return HttpService:JSONDecode(d) end)
+    if ok then return dec end
+    return nil
+end
+
+-- ============== GUI ==============
+local parentGui
+pcall(function() parentGui=(gethui and gethui()) or game:GetService("CoreGui") end)
+if not parentGui then parentGui = LocalPlayer:WaitForChild("PlayerGui") end
+
+local function round(o,r) local c=Instance.new("UICorner") c.CornerRadius=UDim.new(0,r or 6) c.Parent=o return c end
+local function attachHoverScale(btn,t)
+    t = t or 1.02
+    local s = Instance.new("UIScale") s.Scale=1 s.Parent=btn
+    btn.MouseEnter:Connect(function() TweenService:Create(s,TweenInfo.new(0.12),{Scale=t}):Play() end)
+    btn.MouseLeave:Connect(function() TweenService:Create(s,TweenInfo.new(0.12),{Scale=1}):Play() end)
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "brieli_vis_mtc_wh"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder = 999
+screenGui.Parent = parentGui
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0,820,0,540)
+main.Position = UDim2.new(0.5,-410,0.5,-270)
+main.BackgroundColor3 = C.bg
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+main.Parent = screenGui
+round(main, 8)
+
+local mainStroke = Instance.new("UIStroke") mainStroke.Color=C.border mainStroke.Thickness=1 mainStroke.Parent=main
+
+local topbar = Instance.new("Frame")
+topbar.Size = UDim2.new(1,0,0,42) topbar.BackgroundColor3=C.topbar topbar.BorderSizePixel=0 topbar.Parent=main
+round(topbar, 8)
+local topbarCover = Instance.new("Frame")
+topbarCover.Size = UDim2.new(1,0,0,12) topbarCover.Position=UDim2.new(0,0,1,-12)
+topbarCover.BackgroundColor3=C.topbar topbarCover.BorderSizePixel=0 topbarCover.Parent=topbar
+
+local logoDot = Instance.new("Frame")
+logoDot.Size = UDim2.new(0,8,0,8) logoDot.Position=UDim2.new(0,18,0.5,-4)
+logoDot.BackgroundColor3=C.accent logoDot.BorderSizePixel=0 logoDot.Parent=topbar
+round(logoDot, 4)
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size=UDim2.new(0,300,1,0) titleLabel.Position=UDim2.new(0,36,0,0)
+titleLabel.BackgroundTransparency=1 titleLabel.Text="brieli vis" titleLabel.TextColor3=C.text
+titleLabel.TextXAlignment=Enum.TextXAlignment.Left titleLabel.Font=Enum.Font.GothamBold
+titleLabel.TextSize=15 titleLabel.Parent=topbar
+
+local titleSub = Instance.new("TextLabel")
+titleSub.Size=UDim2.new(0,300,1,0) titleSub.Position=UDim2.new(0,118,0,0)
+titleSub.BackgroundTransparency=1 titleSub.Text="· MTC · WH only" titleSub.TextColor3=C.textMute
+titleSub.TextXAlignment=Enum.TextXAlignment.Left titleSub.Font=Enum.Font.Gotham
+titleSub.TextSize=12 titleSub.Parent=topbar
+
+local topbarSep = Instance.new("Frame")
+topbarSep.Size=UDim2.new(1,0,0,1) topbarSep.Position=UDim2.new(0,0,0,42)
+topbarSep.BackgroundColor3=C.border topbarSep.BorderSizePixel=0 topbarSep.Parent=main
+
+-- SIDEBAR
+local sidebar = Instance.new("Frame")
+sidebar.Size=UDim2.new(0,172,1,-43) sidebar.Position=UDim2.new(0,0,0,43)
+sidebar.BackgroundColor3=C.sidebar sidebar.BorderSizePixel=0 sidebar.Parent=main
+local sidebarSep = Instance.new("Frame")
+sidebarSep.Size=UDim2.new(0,1,1,0) sidebarSep.Position=UDim2.new(1,-1,0,0)
+sidebarSep.BackgroundColor3=C.border sidebarSep.BorderSizePixel=0 sidebarSep.Parent=sidebar
+
+local sidebarList = Instance.new("Frame")
+sidebarList.Size=UDim2.new(1,0,1,-60) sidebarList.BackgroundTransparency=1 sidebarList.Parent=sidebar
+local sidebarLayout = Instance.new("UIListLayout")
+sidebarLayout.Padding=UDim.new(0,2) sidebarLayout.SortOrder=Enum.SortOrder.LayoutOrder sidebarLayout.Parent=sidebarList
+local sidebarPad = Instance.new("UIPadding")
+sidebarPad.PaddingTop=UDim.new(0,12) sidebarPad.PaddingLeft=UDim.new(0,8)
+sidebarPad.PaddingRight=UDim.new(0,8) sidebarPad.Parent=sidebarList
+
+local userPanel = Instance.new("Frame")
+userPanel.Size=UDim2.new(1,-16,0,44) userPanel.Position=UDim2.new(0,8,1,-52)
+userPanel.BackgroundColor3=C.panelBg userPanel.BorderSizePixel=0 userPanel.Parent=sidebar
+round(userPanel, 6)
+local userDot = Instance.new("Frame")
+userDot.Size=UDim2.new(0,26,0,26) userDot.Position=UDim2.new(0,9,0.5,-13)
+userDot.BackgroundColor3=C.accentDim userDot.BorderSizePixel=0 userDot.Parent=userPanel
+round(userDot, 13)
+local userInitial = Instance.new("TextLabel")
+userInitial.Size=UDim2.new(1,0,1,0) userInitial.BackgroundTransparency=1
+userInitial.Text=string.sub(LocalPlayer.Name,1,1):upper()
+userInitial.TextColor3=Color3.fromRGB(255,255,255) userInitial.Font=Enum.Font.GothamBold
+userInitial.TextSize=13 userInitial.Parent=userDot
+local userName = Instance.new("TextLabel")
+userName.Size=UDim2.new(1,-48,0,16) userName.Position=UDim2.new(0,42,0,7)
+userName.BackgroundTransparency=1 userName.Text=LocalPlayer.Name userName.TextColor3=C.text
+userName.TextXAlignment=Enum.TextXAlignment.Left userName.Font=Enum.Font.GothamMedium
+userName.TextSize=12 userName.TextTruncate=Enum.TextTruncate.AtEnd userName.Parent=userPanel
+local userTime = Instance.new("TextLabel")
+userTime.Size=UDim2.new(1,-48,0,14) userTime.Position=UDim2.new(0,42,0,23)
+userTime.BackgroundTransparency=1 userTime.Text=os.date("%H:%M:%S") userTime.TextColor3=C.textDim
+userTime.TextXAlignment=Enum.TextXAlignment.Left userTime.Font=Enum.Font.Gotham
+userTime.TextSize=10 userTime.Parent=userPanel
+
+task.spawn(function()
+    while not state.unloaded do userTime.Text = os.date("%H:%M:%S") task.wait(1) end
+end)
+
+-- CONTENT
+local content = Instance.new("Frame")
+content.Size=UDim2.new(1,-173,1,-43) content.Position=UDim2.new(0,173,0,43)
+content.BackgroundColor3=C.bg content.BorderSizePixel=0 content.Parent=main
+
+local bgImage = Instance.new("ImageLabel")
+bgImage.Size=UDim2.new(1,0,1,0) bgImage.BackgroundTransparency=1 bgImage.Image=""
+bgImage.ImageTransparency=0.55 bgImage.ScaleType=Enum.ScaleType.Crop bgImage.ZIndex=0
+bgImage.Visible=false bgImage.Parent=content
+
+local tabHeader = Instance.new("Frame")
+tabHeader.Size=UDim2.new(1,0,0,38) tabHeader.BackgroundColor3=C.bg
+tabHeader.BorderSizePixel=0 tabHeader.ZIndex=2 tabHeader.Parent=content
+local tabHeaderSep = Instance.new("Frame")
+tabHeaderSep.Size=UDim2.new(1,0,0,1) tabHeaderSep.Position=UDim2.new(0,0,1,-1)
+tabHeaderSep.BackgroundColor3=C.border tabHeaderSep.BorderSizePixel=0 tabHeaderSep.Parent=tabHeader
+local tabHeaderLabel = Instance.new("TextLabel")
+tabHeaderLabel.Size=UDim2.new(1,-24,1,0) tabHeaderLabel.Position=UDim2.new(0,20,0,0)
+tabHeaderLabel.BackgroundTransparency=1 tabHeaderLabel.Text="Visuals"
+tabHeaderLabel.TextColor3=C.text tabHeaderLabel.TextXAlignment=Enum.TextXAlignment.Left
+tabHeaderLabel.Font=Enum.Font.GothamBold tabHeaderLabel.TextSize=13 tabHeaderLabel.Parent=tabHeader
+
+local canvas = Instance.new("CanvasGroup")
+canvas.Size=UDim2.new(1,0,1,-38) canvas.Position=UDim2.new(0,0,0,38)
+canvas.BackgroundTransparency=1 canvas.GroupTransparency=0 canvas.ZIndex=2 canvas.Parent=content
+
+local contentScroll = Instance.new("ScrollingFrame")
+contentScroll.Size=UDim2.new(1,0,1,0) contentScroll.BackgroundTransparency=1
+contentScroll.BorderSizePixel=0 contentScroll.ScrollBarThickness=3
+contentScroll.ScrollBarImageColor3=C.accentDim contentScroll.ScrollBarImageTransparency=0.4
+contentScroll.CanvasSize=UDim2.new(0,0,0,0) contentScroll.Parent=canvas
+
+local contentLayout = Instance.new("UIListLayout")
+contentLayout.Padding=UDim.new(0,6) contentLayout.SortOrder=Enum.SortOrder.LayoutOrder contentLayout.Parent=contentScroll
+local contentPad = Instance.new("UIPadding")
+contentPad.PaddingTop=UDim.new(0,12) contentPad.PaddingLeft=UDim.new(0,14)
+contentPad.PaddingRight=UDim.new(0,14) contentPad.PaddingBottom=UDim.new(0,12) contentPad.Parent=contentScroll
+
+contentLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    contentScroll.CanvasSize = UDim2.new(0,0,0,contentLayout.AbsoluteContentSize.Y + 24)
+end)
+
+local tabButtons = {}
+local tabNames = {
+    visuals = { label="Visuals", icon="◉" },
+    misc    = { label="Misc",    icon="⚙" },
+    menu    = { label="Menu",    icon="☰" },
+}
+
+local function switchTab(tabId)
+    if state.tabSwitching then return end
+    state.tabSwitching = true
+    TweenService:Create(canvas,TweenInfo.new(0.12),{GroupTransparency=1}):Play()
+    task.wait(0.12)
+    state.currentTab = tabId
+    for id, btn in pairs(tabButtons) do
+        local act = (id==tabId)
+        btn.BackgroundColor3 = act and C.tabActive or C.sidebar
+        local n = btn:FindFirstChild("TabName")
+        local i = btn:FindFirstChild("TabIcon")
+        if n then n.TextColor3 = act and C.accent or C.textDim end
+        if i then i.TextColor3 = act and C.accent or C.textMute end
+    end
+    if tabNames[tabId] then tabHeaderLabel.Text = tabNames[tabId].label end
+    for _, ch in ipairs(contentScroll:GetChildren()) do
+        if ch:IsA("GuiObject") then
+            ch.Visible = (ch:GetAttribute("Tab") == tabId)
+            if ch.Visible then
+                local st = ch:GetAttribute("SubTab")
+                if st and (st == "team" or st == "enemy") then
+                    ch.Visible = (st == state.playerTab)
+                end
+            end
+        end
+    end
+    TweenService:Create(canvas,TweenInfo.new(0.12),{GroupTransparency=0}):Play()
+    task.wait(0.12)
+    state.tabSwitching = false
+end
+
+for id, info in pairs(tabNames) do
+    local btn = Instance.new("TextButton")
+    btn.Size=UDim2.new(1,0,0,34) btn.BackgroundColor3=C.sidebar
+    btn.BorderSizePixel=0 btn.AutoButtonColor=false btn.Text=""
+    btn.Parent=sidebarList
+    round(btn, 5)
+    attachHoverScale(btn, 1.02)
+    local icon = Instance.new("TextLabel")
+    icon.Name="TabIcon" icon.Size=UDim2.new(0,22,1,0) icon.Position=UDim2.new(0,10,0,0)
+    icon.BackgroundTransparency=1 icon.Text=info.icon icon.TextColor3=C.textMute
+    icon.Font=Enum.Font.GothamBold icon.TextSize=14 icon.TextXAlignment=Enum.TextXAlignment.Left
+    icon.Parent=btn
+    local n = Instance.new("TextLabel")
+    n.Name="TabName" n.Size=UDim2.new(1,-40,1,0) n.Position=UDim2.new(0,36,0,0)
+    n.BackgroundTransparency=1 n.Text=info.label n.TextColor3=C.textDim
+    n.TextXAlignment=Enum.TextXAlignment.Left n.Font=Enum.Font.GothamMedium
+    n.TextSize=12 n.Parent=btn
+    btn.MouseEnter:Connect(function()
+        if state.currentTab ~= id then btn.BackgroundColor3 = C.tabHover n.TextColor3 = C.text end
+    end)
+    btn.MouseLeave:Connect(function()
+        if state.currentTab ~= id then btn.BackgroundColor3 = C.sidebar n.TextColor3 = C.textDim end
+    end)
+    btn.MouseButton1Click:Connect(function() switchTab(id) end)
+    tabButtons[id] = btn
+end
+
+-- UI HELPERS
+local function makeSectionLabel(text, tabId, subTab)
+    local wrap = Instance.new("Frame")
+    wrap.Size=UDim2.new(1,0,0,26) wrap.BackgroundTransparency=1 wrap.Parent=contentScroll
+    wrap:SetAttribute("Tab", tabId)
+    if subTab then wrap:SetAttribute("SubTab", subTab) end
+    local bar = Instance.new("Frame")
+    bar.Size=UDim2.new(0,3,0,12) bar.Position=UDim2.new(0,2,0.5,-6)
+    bar.BackgroundColor3=C.accent bar.BorderSizePixel=0 bar.Parent=wrap
+    round(bar, 2)
+    local l = Instance.new("TextLabel")
+    l.Size=UDim2.new(1,-20,1,0) l.Position=UDim2.new(0,14,0,0)
+    l.BackgroundTransparency=1 l.Text=text l.TextColor3=C.text
+    l.TextXAlignment=Enum.TextXAlignment.Left l.Font=Enum.Font.GothamBold
+    l.TextSize=12 l.Parent=wrap
+    return wrap
+end
+
+local function makeToggle(text, defaultOn, tabId, callback, subTab)
+    local row = Instance.new("TextButton")
+    row.Size=UDim2.new(1,0,0,34) row.BackgroundColor3=C.row
+    row.BorderSizePixel=0 row.AutoButtonColor=false row.Text=""
+    row.Parent=contentScroll
+    row:SetAttribute("Tab", tabId)
+    if subTab then row:SetAttribute("SubTab", subTab) end
+    round(row, 5)
+    attachHoverScale(row, 1.02)
+    local l = Instance.new("TextLabel")
+    l.Size=UDim2.new(1,-70,1,0) l.Position=UDim2.new(0,14,0,0)
+    l.BackgroundTransparency=1 l.Text=text l.TextColor3=C.text
+    l.TextXAlignment=Enum.TextXAlignment.Left l.Font=Enum.Font.GothamMedium
+    l.TextSize=12 l.Parent=row
+    local track = Instance.new("Frame")
+    track.Size=UDim2.new(0,34,0,18) track.Position=UDim2.new(1,-48,0.5,-9)
+    track.BackgroundColor3=defaultOn and C.accent or C.track
+    track.BorderSizePixel=0 track.Parent=row
+    round(track, 9)
+    local knob = Instance.new("Frame")
+    knob.Size=UDim2.new(0,12,0,12)
+    knob.Position=defaultOn and UDim2.new(1,-15,0.5,-6) or UDim2.new(0,3,0.5,-6)
+    knob.BackgroundColor3=Color3.fromRGB(255,255,255) knob.BorderSizePixel=0 knob.Parent=track
+    round(knob, 6)
+    local st = defaultOn
+    row.MouseEnter:Connect(function() row.BackgroundColor3=C.rowHover end)
+    row.MouseLeave:Connect(function() row.BackgroundColor3=C.row end)
+    row.MouseButton1Click:Connect(function()
+        st = not st
+        TweenService:Create(track,TweenInfo.new(0.15),{BackgroundColor3=st and C.accent or C.track}):Play()
+        if st then
+            knob:TweenPosition(UDim2.new(1,-15,0.5,-6),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.15,true)
+        else
+            knob:TweenPosition(UDim2.new(0,3,0.5,-6),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.15,true)
+        end
+        callback(st)
+    end)
+    return row
+end
+
+local function makeMasterToggle(text, defaultOn, tabId, callback, subTab)
+    local row = Instance.new("TextButton")
+    row.Size=UDim2.new(1,0,0,42) row.BackgroundColor3=C.panelBg
+    row.BorderSizePixel=0 row.AutoButtonColor=false row.Text=""
+    row.Parent=contentScroll
+    row:SetAttribute("Tab", tabId)
+    if subTab then row:SetAttribute("SubTab", subTab) end
+    round(row, 5)
+    attachHoverScale(row, 1.02)
+    local l = Instance.new("TextLabel")
+    l.Size=UDim2.new(1,-100,1,0) l.Position=UDim2.new(0,16,0,0)
+    l.BackgroundTransparency=1 l.Text=text l.TextColor3=C.text
+    l.TextXAlignment=Enum.TextXAlignment.Left l.Font=Enum.Font.GothamBold
+    l.TextSize=13 l.Parent=row
+    local status = Instance.new("TextLabel")
+    status.Size=UDim2.new(0,50,1,0) status.Position=UDim2.new(1,-108,0,0)
+    status.BackgroundTransparency=1 status.Text=defaultOn and "on" or "off"
+    status.TextColor3=defaultOn and C.accent or C.textMute
+    status.TextXAlignment=Enum.TextXAlignment.Right status.Font=Enum.Font.GothamBold
+    status.TextSize=11 status.Parent=row
+    local track = Instance.new("Frame")
+    track.Size=UDim2.new(0,38,0,20) track.Position=UDim2.new(1,-50,0.5,-10)
+    track.BackgroundColor3=defaultOn and C.accent or C.track
+    track.BorderSizePixel=0 track.Parent=row
+    round(track, 10)
+    local knob = Instance.new("Frame")
+    knob.Size=UDim2.new(0,14,0,14)
+    knob.Position=defaultOn and UDim2.new(1,-17,0.5,-7) or UDim2.new(0,3,0.5,-7)
+    knob.BackgroundColor3=Color3.fromRGB(255,255,255) knob.BorderSizePixel=0 knob.Parent=track
+    round(knob, 7)
+    local st = defaultOn
+    row.MouseEnter:Connect(function() row.BackgroundColor3=C.rowHover end)
+    row.MouseLeave:Connect(function() row.BackgroundColor3=C.panelBg end)
+    row.MouseButton1Click:Connect(function()
+        st = not st
+        TweenService:Create(track,TweenInfo.new(0.15),{BackgroundColor3=st and C.accent or C.track}):Play()
+        status.Text = st and "on" or "off"
+        TweenService:Create(status,TweenInfo.new(0.15),{TextColor3=st and C.accent or C.textMute}):Play()
+        if st then
+            knob:TweenPosition(UDim2.new(1,-17,0.5,-7),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.15,true)
+        else
+            knob:TweenPosition(UDim2.new(0,3,0.5,-7),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.15,true)
+        end
+        callback(st)
+    end)
+    return row
+end
+
+local function makeColorButton(text, initialColor, tabId, callback, subTab)
+    local btn = Instance.new("TextButton")
+    btn.Size=UDim2.new(1,0,0,34) btn.BackgroundColor3=C.row
+    btn.BorderSizePixel=0 btn.AutoButtonColor=false btn.Text=""
+    btn.Parent=contentScroll
+    btn:SetAttribute("Tab", tabId)
+    if subTab then btn:SetAttribute("SubTab", subTab) end
+    round(btn, 5)
+    attachHoverScale(btn, 1.02)
+    local l = Instance.new("TextLabel")
+    l.Size=UDim2.new(1,-70,1,0) l.Position=UDim2.new(0,14,0,0)
+    l.BackgroundTransparency=1 l.Text=text l.TextColor3=C.text
+    l.TextXAlignment=Enum.TextXAlignment.Left l.Font=Enum.Font.GothamMedium
+    l.TextSize=12 l.Parent=btn
+    local sw = Instance.new("Frame")
+    sw.Size=UDim2.new(0,22,0,22) sw.Position=UDim2.new(1,-36,0.5,-11)
+    sw.BackgroundColor3=initialColor sw.BorderSizePixel=0 sw.Parent=btn
+    round(sw, 4)
+    local sws = Instance.new("UIStroke") sws.Color=Color3.fromRGB(255,255,255) sws.Thickness=1 sws.Transparency=0.8 sws.Parent=sw
+    local presets = {
+        Color3.fromRGB(0,170,255),Color3.fromRGB(255,40,40),
+        Color3.fromRGB(255,200,0),Color3.fromRGB(0,255,100),
+        Color3.fromRGB(255,0,255),Color3.fromRGB(255,140,0),
+        Color3.fromRGB(255,255,255),Color3.fromRGB(0,255,255),
+    }
+    local idx = 1
+    for i, c in ipairs(presets) do if c == initialColor then idx = i break end end
+    btn.MouseEnter:Connect(function() btn.BackgroundColor3=C.rowHover end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3=C.row end)
+    btn.MouseButton1Click:Connect(function()
+        idx = idx % #presets + 1
+        local cc = presets[idx]
+        sw.BackgroundColor3 = cc
+        callback(cc)
+    end)
+    return btn
+end
+
+local function makeSlider(text, minV, maxV, defaultV, tabId, callback, step, subTab)
+    step = step or 1
+    local frame = Instance.new("Frame")
+    frame.Size=UDim2.new(1,0,0,52) frame.BackgroundColor3=C.row
+    frame.BorderSizePixel=0 frame.Parent=contentScroll
+    frame:SetAttribute("Tab", tabId)
+    if subTab then frame:SetAttribute("SubTab", subTab) end
+    round(frame, 5)
+    local l = Instance.new("TextLabel")
+    l.Size=UDim2.new(1,-90,0,20) l.Position=UDim2.new(0,14,0,6)
+    l.BackgroundTransparency=1 l.Text=text l.TextColor3=C.text
+    l.TextXAlignment=Enum.TextXAlignment.Left l.Font=Enum.Font.GothamMedium
+    l.TextSize=12 l.Parent=frame
+    local vl = Instance.new("TextLabel")
+    vl.Size=UDim2.new(0,60,0,20) vl.Position=UDim2.new(1,-74,0,6)
+    vl.BackgroundTransparency=1 vl.Text=tostring(defaultV) vl.TextColor3=C.accent
+    vl.TextXAlignment=Enum.TextXAlignment.Right vl.Font=Enum.Font.GothamBold
+    vl.TextSize=12 vl.Parent=frame
+    local track = Instance.new("TextButton")
+    track.Size=UDim2.new(1,-28,0,6) track.Position=UDim2.new(0,14,0,34)
+    track.BackgroundColor3=C.track track.BorderSizePixel=0
+    track.AutoButtonColor=false track.Text="" track.Parent=frame
+    round(track, 3)
+    local fill = Instance.new("Frame")
+    fill.Size=UDim2.new((defaultV-minV)/(maxV-minV),0,1,0)
+    fill.BackgroundColor3=C.accent fill.BorderSizePixel=0 fill.Parent=track
+    round(fill, 3)
+    local handle = Instance.new("Frame")
+    handle.Size=UDim2.new(0,12,0,12)
+    handle.Position=UDim2.new((defaultV-minV)/(maxV-minV),-6,0.5,-6)
+    handle.BackgroundColor3=Color3.fromRGB(255,255,255) handle.BorderSizePixel=0
+    handle.ZIndex=2 handle.Parent=track
+    round(handle, 6)
+    local drag = false
+    local function upd(input)
+        local rx = math.clamp((input.Position.X - track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+        local v = minV + (maxV-minV)*rx
+        if step >= 1 then v = math.floor(v/step+0.5)*step end
+        fill.Size = UDim2.new(rx,0,1,0)
+        handle.Position = UDim2.new(rx,-6,0.5,-6)
+        vl.Text = step >= 1 and tostring(math.floor(v+0.5)) or string.format("%.2f",v)
+        callback(v)
+    end
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            drag = true main.Active = false upd(input)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            upd(input)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if drag then drag = false main.Active = true end
+        end
+    end)
+    return frame
+end
+
+local function makeActionButton(text, tabId, color, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size=UDim2.new(1,0,0,34)
+    btn.BackgroundColor3 = color or C.row
+    btn.BorderSizePixel=0 btn.AutoButtonColor=false btn.Text="  "..text
+    btn.TextColor3 = color and Color3.fromRGB(255,255,255) or C.text
+    btn.TextXAlignment=Enum.TextXAlignment.Left btn.Font=Enum.Font.GothamMedium
+    btn.TextSize=12 btn.Parent=contentScroll
+    btn:SetAttribute("Tab", tabId)
+    round(btn, 5)
+    attachHoverScale(btn, 1.03)
+    btn.MouseEnter:Connect(function()
+        if not color then btn.BackgroundColor3=C.rowHover end
+    end)
+    btn.MouseLeave:Connect(function()
+        if not color then btn.BackgroundColor3=C.row end
+    end)
+    btn.MouseButton1Click:Connect(function() callback(btn) end)
+    return btn
+end
+
+local function makeTextBox(ph, tabId, onApply)
+    local frame = Instance.new("Frame")
+    frame.Size=UDim2.new(1,0,0,34) frame.BackgroundColor3=C.row
+    frame.BorderSizePixel=0 frame.Parent=contentScroll
+    frame:SetAttribute("Tab", tabId)
+    round(frame, 5)
+    local box = Instance.new("TextBox")
+    box.Size=UDim2.new(1,-110,1,0) box.Position=UDim2.new(0,10,0,0)
+    box.BackgroundTransparency=1 box.Text="" box.PlaceholderText=ph
+    box.TextColor3=C.text box.PlaceholderColor3=C.textMute
+    box.Font=Enum.Font.GothamMedium box.TextSize=12
+    box.TextXAlignment=Enum.TextXAlignment.Left box.ClearTextOnFocus=false
+    box.Parent=frame
+    local ap = Instance.new("TextButton")
+    ap.Size=UDim2.new(0,90,1,0) ap.Position=UDim2.new(1,-95,0,0)
+    ap.BackgroundColor3=C.tabActive ap.BorderSizePixel=0
+    ap.Text="Применить" ap.TextColor3=C.accent
+    ap.Font=Enum.Font.GothamBold ap.TextSize=11 ap.Parent=frame
+    round(ap, 4)
+    ap.MouseButton1Click:Connect(function() onApply(box.Text) end)
+    return frame, box
+end
+
+local subTabButtons = {}
+local function makeSubTabBar(subTabs, defaultSub)
+    local bar = Instance.new("Frame")
+    bar.Size=UDim2.new(1,0,0,32) bar.BackgroundTransparency=1
+    bar.Parent=contentScroll
+    bar:SetAttribute("Tab", "visuals")
+    bar:SetAttribute("SubTabBar", "player")
+    local layout = Instance.new("UIListLayout")
+    layout.FillDirection=Enum.FillDirection.Horizontal layout.Padding=UDim.new(0,4)
+    layout.Parent=bar
+    for _, sub in ipairs(subTabs) do
+        local b = Instance.new("TextButton")
+        b.Size=UDim2.new(0,120,1,0)
+        b.BackgroundColor3 = sub.id == defaultSub and C.tabActive or C.row
+        b.BorderSizePixel=0 b.AutoButtonColor=false b.Text=sub.label
+        b.TextColor3 = sub.id == defaultSub and C.accent or C.textDim
+        b.Font=Enum.Font.GothamMedium b.TextSize=12 b.Parent=bar
+        round(b, 5)
+        attachHoverScale(b, 1.02)
+        b.MouseButton1Click:Connect(function()
+            state.playerTab = sub.id
+            for id, bb in pairs(subTabButtons) do
+                bb.BackgroundColor3 = (id == sub.id) and C.tabActive or C.row
+                bb.TextColor3 = (id == sub.id) and C.accent or C.textDim
+            end
+            for _, ch in ipairs(contentScroll:GetChildren()) do
+                if ch:IsA("GuiObject") then
+                    local st = ch:GetAttribute("SubTab")
+                    if st and (st == "team" or st == "enemy") then
+                        ch.Visible = (st == sub.id) and (ch:GetAttribute("Tab") == state.currentTab)
+                    end
+                end
+            end
+        end)
+        subTabButtons[sub.id] = b
+    end
+    return bar
+end
+
+local function applyAccentColor(newColor)
+    local old = C.accent
+    if old == newColor then return end
+    C.accent = newColor
+    C.accentDim = Color3.new(newColor.R*0.65, newColor.G*0.65, newColor.B*0.65)
+    for _, d in ipairs(screenGui:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            if d.TextColor3 == old then d.TextColor3 = newColor end
+        end
+        if d:IsA("Frame") or d:IsA("TextButton") then
+            if d.BackgroundColor3 == old then d.BackgroundColor3 = newColor end
+        end
+        if d:IsA("UIStroke") then
+            if d.Color == old then d.Color = newColor end
+        end
+    end
+    logoDot.BackgroundColor3 = newColor
+    userDot.BackgroundColor3 = C.accentDim
+    contentScroll.ScrollBarImageColor3 = C.accentDim
+    if state.currentTab and tabButtons[state.currentTab] then
+        tabButtons[state.currentTab].BackgroundColor3 = C.tabActive
+    end
+end
+
+local function applyBgImage()
+    if state.configBgImageEnabled and state.configBgImage ~= "" then
+        bgImage.Image = state.configBgImage
+        bgImage.ImageTransparency = state.configBgImageTransparency
+        bgImage.Visible = true
+        content.BackgroundTransparency = 0.15
+    else
+        bgImage.Visible = false bgImage.Image = "" content.BackgroundTransparency = 0
+    end
+end
+
+-- ============== ИГРОВАЯ ЛОГИКА ==============
+local function getPlayerTeam(player)
+    if player.Team and player.Team.Name and player.Team.Name ~= "" then return player.Team.Name end
+    if player.TeamColor then return player.TeamColor.Name end
+    local char = player.Character
+    if char then
+        local t = char:GetAttribute("Team") or char:GetAttribute("TeamName") or char:GetAttribute("team")
+        if t then return tostring(t) end
+    end
+    local t = player:GetAttribute("Team") or player:GetAttribute("TeamName") or player:GetAttribute("team")
+    if t then return tostring(t) end
+    return nil
+end
+local function getMyTeam() return getPlayerTeam(LocalPlayer) end
+local function isEnemyPlayer(player)
+    if player == LocalPlayer then return false end
+    local my = getMyTeam() local their = getPlayerTeam(player)
+    if not my or not their then return false end
+    return my ~= their
+end
+
+local function refreshVehicleCache()
+    local nc = {}
+    local spawned = Workspace:FindFirstChild("SpawnedVehicles")
+    if not spawned then state.vehicleCache = nc return end
+    local myTeam = getMyTeam()
+    for _, v in ipairs(spawned:GetChildren()) do
+        if v:IsA("Model") then
+            local pp = v.PrimaryPart
+            if not pp then pp = v:FindFirstChildWhichIsA("BasePart", true) end
+            if pp then
+                local ok, cf, sz = pcall(function() return v:GetBoundingBox() end)
+                local hx, hy, hz
+                if ok then hx, hy, hz = sz.X/2, sz.Y/2, sz.Z/2
+                else hx, hy, hz = pp.Size.X/2, pp.Size.Y/2, pp.Size.Z/2 end
+                local driver = nil
+                for _, seat in ipairs(v:GetDescendants()) do
+                    if seat:IsA("VehicleSeat") and seat.Occupant then
+                        local plr = Players:GetPlayerFromCharacter(seat.Occupant.Parent)
+                        if plr then driver = plr break end
+                    end
+                end
+                local team = driver and getPlayerTeam(driver) or nil
+                local isEnemy = false
+                if myTeam and team then isEnemy = (team ~= myTeam) end
+                nc[v] = { pp=pp, hx=hx, hy=hy, hz=hz, team=team, isEnemy=isEnemy, driver=driver }
+            end
+        end
+    end
+    state.vehicleCache = nc
+end
+
+-- ============== DRONE DETECTION ==============
+local function findDroneForLocalPlayer()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return nil end
+
+    local seat = hum.SeatPart
+    if seat and seat:IsA("VehicleSeat") then
+        local model = seat:FindFirstAncestorOfClass("Model")
+        if model then
+            local n = model.Name:lower()
+            if n:find("drone") or n:find("uav") or n:find("quadcopter") or n:find("fpv") then
+                return model
+            end
+        end
+    end
+
+    local myNameLower = LocalPlayer.Name:lower()
+    local myUserId = LocalPlayer.UserId
+    for _, d in ipairs(Workspace:GetChildren()) do
+        if d:IsA("Model") then
+            local n = d.Name:lower()
+            if n:find("drone") or n:find("uav") or n:find("quadcopter") or n:find("fpv") then
+                local owner = d:GetAttribute("Owner")
+                    or d:GetAttribute("Controller")
+                    or d:GetAttribute("Player")
+                    or d:GetAttribute("Operator")
+                    or d:GetAttribute("Pilot")
+                if owner then
+                    if owner == LocalPlayer
+                       or owner == myNameLower
+                       or owner == LocalPlayer.Name
+                       or owner == myUserId then
+                        return d
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function getDroneOrigin()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.SeatPart and hum.SeatPart:IsA("BasePart") then
+        local seatParent = hum.SeatPart:FindFirstAncestorOfClass("Model")
+        if seatParent then
+            local n = seatParent.Name:lower()
+            if n:find("drone") or n:find("uav") or n:find("quadcopter") or n:find("fpv") then
+                return nil
+            end
+        end
+        return hum.SeatPart.Position
+    end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if root then return root.Position end
+    return nil
+end
+
+-- ============== DRAWING HELPERS ==============
+local function col3(c) return Color3.new(c.R, c.G, c.B) end
+
+local function mkPlayerDrawings()
+    return {
+        outline = Drawing.new("Square"), box = Drawing.new("Square"),
+        name = Drawing.new("Text"), dist = Drawing.new("Text"),
+        hpBg = Drawing.new("Square"), hpFill = Drawing.new("Square"),
+    }
+end
+
+local function mkVehDrawings()
+    local d = {
+        name = Drawing.new("Text"),
+        dist = Drawing.new("Text"),
+    }
+    for i = 1, 12 do
+        d["wire"..i] = Drawing.new("Line")
+    end
+    return d
+end
+
+local function destroyDrawings(d)
+    if not d then return end
+    for _, o in pairs(d) do pcall(function() o:Remove() end) end
+end
+local function hideDrawings(d)
+    if not d then return end
+    for _, o in pairs(d) do
+        if o and o.Visible ~= nil and o.Visible then o.Visible = false end
+    end
+end
+local function safeDraw(cache, key, factory)
+    if not cache[key] then
+        local ok, d = pcall(factory)
+        if ok and d then cache[key] = d end
+    end
+    return cache[key]
+end
+local function setp(obj, prop, value)
+    if obj[prop] ~= value then obj[prop] = value end
+end
+
+-- ============== CONVEX HULL ==============
+local function convexHull(pts)
+    local n = #pts
+    if n < 3 then return pts end
+    table.sort(pts, function(a,b)
+        if a.x ~= b.x then return a.x < b.x end
+        return a.y < b.y
+    end)
+    local function cross(o,a,b)
+        return (a.x - o.x)*(b.y - o.y) - (a.y - o.y)*(b.x - o.x)
+    end
+    local lower = {}
+    for i = 1, n do
+        while #lower >= 2 and cross(lower[#lower-1], lower[#lower], pts[i]) <= 0 do
+            table.remove(lower)
+        end
+        table.insert(lower, pts[i])
+    end
+    local upper = {}
+    for i = n, 1, -1 do
+        while #upper >= 2 and cross(upper[#upper-1], upper[#upper], pts[i]) <= 0 do
+            table.remove(upper)
+        end
+        table.insert(upper, pts[i])
+    end
+    table.remove(lower)
+    table.remove(upper)
+    local hull = {}
+    for _, p in ipairs(lower) do table.insert(hull, p) end
+    for _, p in ipairs(upper) do table.insert(hull, p) end
+    return hull
+end
+
+-- ============== TRAJECTORY ==============
+local TRAJ_STEPS = 40
+local TRAJ_TIME = 3
+local TRAJ_THICK = 2
+local TRAJ_FALLBACK_SPEED = 250
+
+local function ensureTrajLines()
+    while #state.trajLines < TRAJ_STEPS do
+        local ok, line = pcall(Drawing.new, "Line")
+        if not ok or not line then break end
+        line.Thickness = TRAJ_THICK
+        line.Visible = false
+        table.insert(state.trajLines, line)
+    end
+end
+
+local function hideAllTraj()
+    for _, l in ipairs(state.trajLines) do
+        if l.Visible then l.Visible = false end
+    end
+    if state.trajImpact and state.trajImpact.Visible then state.trajImpact.Visible = false end
+end
+
+local function updateTrajectory(cam, camPos)
+    if not state.trajEnabled then hideAllTraj() return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not char or not hum or hum.Health <= 0 then hideAllTraj() return end
+
+    local info = nil
+    local ok, r = pcall(getMuzzleInfo)
+    if ok then info = r end
+
+    local origin, dir, speed
+    if info and info.pos then
+        origin = info.pos
+        dir = info.dir or cam.CFrame.LookVector
+        speed = info.speed or TRAJ_FALLBACK_SPEED
+    else
+        origin = camPos + cam.CFrame.LookVector * 2
+        dir = cam.CFrame.LookVector
+        speed = TRAJ_FALLBACK_SPEED
+    end
+
+    local g = Workspace.Gravity
+    if not g or g <= 0 then g = 196.2 end
+
+    local dt = TRAJ_TIME / TRAJ_STEPS
+    ensureTrajLines()
+
+    local groundY = 0
+    pcall(function()
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { char }
+        local hit = Workspace:Raycast(origin, Vector3.new(0, -1000, 0), rp)
+        if hit then groundY = hit.Position.Y end
+    end)
+
+    local prevSp = nil
+    local lastSp = nil
+    local drawn = 0
+
+    for i = 1, TRAJ_STEPS do
+        local t = i * dt
+        local pos = origin + dir * (speed * t) + Vector3.new(0, -0.5 * g * t * t, 0)
+        local sp, onScreen = cam:WorldToViewportPoint(pos)
+        if onScreen and prevSp then
+            local line = state.trajLines[i]
+            if line then
+                line.From = Vector2.new(prevSp.X, prevSp.Y)
+                line.To = Vector2.new(sp.X, sp.Y)
+                line.Color = col3(state.configAccent or Color3.fromRGB(255,200,0))
+                line.Thickness = TRAJ_THICK
+                if not line.Visible then line.Visible = true end
+                drawn = drawn + 1
+            end
+        end
+        lastSp = sp
+        prevSp = sp
+        if pos.Y < groundY - 2 then break end
+    end
+
+    for i = drawn + 1, #state.trajLines do
+        if state.trajLines[i].Visible then state.trajLines[i].Visible = false end
+    end
+
+    if lastSp then
+        if not state.trajImpact then
+            local ok2, circle = pcall(Drawing.new, "Circle")
+            if ok2 and circle then
+                circle.Thickness = 2
+                circle.NumSides = 24
+                circle.Radius = 6
+                circle.Filled = true
+                circle.Transparency = 0.4
+                state.trajImpact = circle
+            end
+        end
+        if state.trajImpact then
+            state.trajImpact.Color = col3(state.configAccent or Color3.fromRGB(255,200,0))
+            state.trajImpact.Position = Vector2.new(lastSp.X, lastSp.Y)
+            if not state.trajImpact.Visible then state.trajImpact.Visible = true end
+        end
+    end
+end
+
+-- ============== ANTI-HISS ==============
+local HISS_KEYWORDS = {
+    "static","noise","hiss","drone","glitch","jam","interference","distort",
+    "scanline","vhs","crt","signal","interfere","snow","grain","film","shake",
+    "blur","overlay","effect","blackout","dirt","camera","cam","vision",
+    "feedback","disrupt","blockage","jammer","emp","pulse",
+}
+
+local function nameMatches(name)
+    local n = name:lower()
+    for _, kw in ipairs(HISS_KEYWORDS) do
+        if n:find(kw) then return true end
+    end
+    return false
+end
+
+local function hideInstance(inst, prop, val)
+    if state.antiHissHidden[inst] then return end
+    local old
+    pcall(function() old = inst[prop] end)
+    state.antiHissHidden[inst] = { prop = prop, val = val, old = old }
+    pcall(function() inst[prop] = val end)
+    local conn
+    conn = inst:GetPropertyChangedSignal(prop):Connect(function()
+        if state.unloaded then
+            pcall(function() conn:Disconnect() end)
+            return
+        end
+        if inst[prop] ~= val then
+            pcall(function() inst[prop] = val end)
+        end
+    end)
+    table.insert(state.antiHissConns, conn)
+end
+
+local function isOurGui(inst)
+    if not inst then return false end
+    local top = inst
+    while top.Parent and top.Parent ~= parentGui do
+        top = top.Parent
+    end
+    return top == screenGui
+end
+
+local function scanAndHideHiss()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if pg then
+        for _, d in ipairs(pg:GetDescendants()) do
+            if d:IsA("GuiObject") and nameMatches(d.Name) then
+                if not isOurGui(d) then
+                    hideInstance(d, "Visible", false)
+                end
+            elseif d:IsA("Sound") and nameMatches(d.Name) then
+                hideInstance(d, "Volume", 0)
+            end
+        end
+    end
+
+    local cg = nil
+    pcall(function() cg = game:GetService("CoreGui") end)
+    if cg and cg ~= parentGui then
+        for _, d in ipairs(cg:GetDescendants()) do
+            if d:IsA("GuiObject") and nameMatches(d.Name) then
+                if not isOurGui(d) then
+                    hideInstance(d, "Visible", false)
+                end
+            elseif d:IsA("Sound") and nameMatches(d.Name) then
+                hideInstance(d, "Volume", 0)
+            end
+        end
+    end
+
+    local ss = game:GetService("SoundService")
+    for _, d in ipairs(ss:GetDescendants()) do
+        if d:IsA("Sound") and nameMatches(d.Name) then
+            hideInstance(d, "Volume", 0)
+        end
+    end
+
+    local LightingSvc = game:GetService("Lighting")
+    for _, d in ipairs(LightingSvc:GetChildren()) do
+        if d:IsA("ColorCorrectionEffect") or d:IsA("BlurEffect")
+           or d:IsA("BloomEffect") or d:IsA("SunRaysEffect") or d:IsA("DepthOfFieldEffect")
+           or d:IsA("Atmosphere") or d:IsA("Sky")
+           or d:IsA("ParticleEmitter") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+            if nameMatches(d.Name) then
+                if d:IsA("Atmosphere") or d:IsA("Sky") then
+                    hideInstance(d, "Density", 0)
+                else
+                    hideInstance(d, "Enabled", false)
+                end
+            end
+        end
+    end
+
+    local cam = Workspace.CurrentCamera
+    if cam then
+        for _, d in ipairs(cam:GetDescendants()) do
+            if d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+                if nameMatches(d.Name) then
+                    hideInstance(d, "Enabled", false)
+                end
+            elseif d:IsA("BasePart") and nameMatches(d.Name) then
+                hideInstance(d, "Transparency", 1)
+            elseif d:IsA("ParticleEmitter") and nameMatches(d.Name) then
+                hideInstance(d, "Enabled", false)
+            end
+        end
+    end
+end
+
+local function enableAntiHiss()
+    scanAndHideHiss()
+    if state.antiHissLoop then return end
+    state.antiHissLoop = task.spawn(function()
+        while not state.unloaded and state.antiHissEnabled do
+            task.wait(0.5)
+            scanAndHideHiss()
+        end
+        state.antiHissLoop = nil
+    end)
+end
+
+local function disableAntiHiss()
+    for _, c in ipairs(state.antiHissConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    state.antiHissConns = {}
+    for inst, data in pairs(state.antiHissHidden) do
+        if inst and inst.Parent then
+            pcall(function() inst[data.prop] = data.old end)
+        end
+    end
+    state.antiHissHidden = {}
+end
+
+-- ============== DRONE RANGE (только текст) ==============
+local function hideDroneRange()
+    if state.droneRangeText and state.droneRangeText.Visible then
+        state.droneRangeText.Visible = false
+    end
+end
+
+local function updateDroneRange(cam)
+    if not state.droneRangeEnabled then hideDroneRange() return end
+
+    local drone = findDroneForLocalPlayer()
+    if not drone then hideDroneRange() return end
+    if not drone.PrimaryPart then hideDroneRange() return end
+
+    local origin = getDroneOrigin()
+    if not origin then
+        origin = drone.PrimaryPart.Position
+    end
+
+    local dronePos = drone.PrimaryPart.Position
+    local distance = (dronePos - origin).Magnitude
+
+    local maxRange = DRONE_MAX_RANGE
+    local pct = math.clamp(distance / maxRange, 0, 1)
+
+    local vpSize = cam.ViewportSize
+
+    -- Цвет по проценту
+    local col
+    if pct < 0.5 then col = Color3.fromRGB(60, 220, 100)
+    elseif pct < 0.8 then col = Color3.fromRGB(255, 200, 0)
+    else col = Color3.fromRGB(255, 60, 60) end
+
+    if not state.droneRangeText then
+        local ok, t = pcall(Drawing.new, "Text")
+        if ok and t then
+            t.Size = 16
+            t.Center = true
+            t.Outline = true
+            t.OutlineColor = Color3.new(0,0,0)
+            state.droneRangeText = t
+        end
+    end
+    if state.droneRangeText then
+        state.droneRangeText.Text = string.format("Дрон: %d / %d studs (%.0f%%)",
+            math.floor(distance), maxRange, pct * 100)
+        state.droneRangeText.Color = col
+        state.droneRangeText.Position = Vector2.new(vpSize.X/2, 60)
+        if not state.droneRangeText.Visible then state.droneRangeText.Visible = true end
+    end
+end
+
+-- ============== getMuzzleInfo ==============
+local function findMuzzleFromTool(tool)
+    if not tool then return nil end
+    local handle = tool:FindFirstChild("Handle")
+    for _, d in ipairs(tool:GetDescendants()) do
+        if d:IsA("Attachment") then
+            local n = d.Name:lower()
+            if n:find("muzzle") or n:find("barrel") or n:find("fire") or n:find("shoot") or n:find("tip") or n:find("end") then
+                local ok, wcf = pcall(function() return d.WorldCFrame end)
+                if ok and wcf then
+                    return wcf.Position, wcf.LookVector, tool
+                end
+            end
+        end
+    end
+    if handle then
+        local wcf = handle.CFrame * CFrame.new(0, 0, -handle.Size.Z/2)
+        return wcf.Position, handle.CFrame.LookVector, tool
+    end
+    return nil
+end
+
+local function findMuzzleFromVehicle(vehicle)
+    if not vehicle then return nil end
+    for _, d in ipairs(vehicle:GetDescendants()) do
+        if d:IsA("Attachment") then
+            local n = d.Name:lower()
+            if n:find("muzzle") or n:find("barrel") or n:find("cannon") or n:find("gunend") or n:find("fire") then
+                local ok, wcf = pcall(function() return d.WorldCFrame end)
+                if ok and wcf then return wcf.Position, wcf.LookVector, vehicle end
+            end
+        end
+    end
+    for _, d in ipairs(vehicle:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local n = d.Name:lower()
+            if n:find("barrel") or n:find("cannon") or n:find("muzzle") then
+                local wcf = d.CFrame * CFrame.new(0, 0, -d.Size.Z/2)
+                return wcf.Position, d.CFrame.LookVector, vehicle
+            end
+        end
+    end
+    return nil
+end
+
+local function readSpeedFromAttributes(obj)
+    if not obj then return nil end
+    local names = {"MuzzleVelocity","ProjectileSpeed","BulletSpeed","ShellSpeed","MuzzleSpeed","Speed","Velocity"}
+    for _, an in ipairs(names) do
+        local v = obj:GetAttribute(an)
+        if type(v) == "number" and v > 0 then return v end
+    end
+    return nil
+end
+
+function getMuzzleInfo()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        local pos, dir = findMuzzleFromTool(tool)
+        if pos then
+            local speed = readSpeedFromAttributes(tool)
+            if not speed then
+                local h = tool:FindFirstChild("Handle")
+                if h then speed = readSpeedFromAttributes(h) end
+            end
+            return { pos = pos, dir = dir, speed = speed }
+        end
+    end
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
+        local vehicle = hum.SeatPart:FindFirstAncestorOfClass("Model")
+        if vehicle then
+            local pos, dir = findMuzzleFromVehicle(vehicle)
+            if pos then
+                local speed = readSpeedFromAttributes(vehicle)
+                return { pos = pos, dir = dir, speed = speed }
+            end
+        end
+    end
+    return nil
+end
+
+-- ============== RENDER ==============
+local RENDER_INTERVAL = 1 / 30
+local lastRender = 0
+
+local renderConn = RunService.RenderStepped:Connect(function()
+    if state.unloaded then return end
+    local now = tick()
+    if now - lastRender < RENDER_INTERVAL then return end
+    lastRender = now
+
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local camCF = cam.CFrame
+    local camPos = camCF.Position
+    local camLook = camCF.LookVector
+    local vpSize = cam.ViewportSize
+
+    if state.vEnabled and (now - state.vehicleCacheTime > 1) then
+        state.vehicleCacheTime = now
+        pcall(refreshVehicleCache)
+    end
+
+    if not state.pTeam.enabled then for _, d in pairs(state.teamDrawings) do hideDrawings(d) end end
+    if not state.pEnemy.enabled then for _, d in pairs(state.enemyDrawings) do hideDrawings(d) end end
+    if not state.vEnabled then for _, d in pairs(state.vehicleDrawings) do hideDrawings(d) end end
+
+    -- PLAYER ESP
+    if state.pTeam.enabled or state.pEnemy.enabled then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then
+                local dt = state.teamDrawings[player] if dt then hideDrawings(dt) end
+                local de = state.enemyDrawings[player] if de then hideDrawings(de) end
+                continue
+            end
+            local isEnemy = isEnemyPlayer(player)
+            local cfg = isEnemy and state.pEnemy or state.pTeam
+            local cache = isEnemy and state.enemyDrawings or state.teamDrawings
+
+            if not cfg.enabled then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+
+            local char = player.Character
+            if not char or not Players:FindFirstChild(player.Name) then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+
+            local head = char:FindFirstChild("Head")
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if not head or not root or not hum or hum.Health <= 0 then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+
+            local rootPos = root.Position
+            local toT = rootPos - camPos
+            if toT:Dot(camLook) < 0 then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+            local dist3d = toT.Magnitude
+            if dist3d > cfg.maxDist then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+            local sp, onScreen = cam:WorldToViewportPoint(rootPos)
+            if not onScreen or sp.X < -200 or sp.X > vpSize.X + 200 or sp.Y < -200 or sp.Y > vpSize.Y + 200 then
+                local d = cache[player] if d then hideDrawings(d) end
+                continue
+            end
+
+            local d = safeDraw(cache, player, mkPlayerDrawings)
+            if not d then continue end
+            local col = col3(cfg.color)
+
+            local headSp = cam:WorldToViewportPoint(head.Position + Vector3.new(0,0.5,0))
+            local footSp = cam:WorldToViewportPoint(rootPos - Vector3.new(0,3,0))
+            local boxH = math.abs(footSp.Y - headSp.Y)
+            local boxW = boxH * 0.55
+            local boxX = headSp.X - boxW/2
+            local boxY = headSp.Y
+
+            if cfg.showBox and cfg.showOutline then
+                setp(d.outline,"Visible",true) setp(d.outline,"Color",Color3.new(0,0,0))
+                setp(d.outline,"Thickness",3) setp(d.outline,"Filled",false)
+                d.outline.Size=Vector2.new(boxW,boxH) d.outline.Position=Vector2.new(boxX,boxY)
+            else setp(d.outline,"Visible",false) end
+
+            if cfg.showBox then
+                setp(d.box,"Visible",true) setp(d.box,"Color",col)
+                setp(d.box,"Thickness",1) setp(d.box,"Filled",false)
+                d.box.Size=Vector2.new(boxW,boxH) d.box.Position=Vector2.new(boxX,boxY)
+            else setp(d.box,"Visible",false) end
+
+            if cfg.showName then
+                setp(d.name,"Visible",true) setp(d.name,"Text",player.Name)
+                setp(d.name,"Color",col) setp(d.name,"Size",13)
+                setp(d.name,"Center",true) setp(d.name,"Outline",true)
+                setp(d.name,"OutlineColor",Color3.new(0,0,0))
+                d.name.Position=Vector2.new(headSp.X,boxY-16)
+            else setp(d.name,"Visible",false) end
+
+            if cfg.showDistance then
+                setp(d.dist,"Visible",true)
+                d.dist.Text=string.format("%.0f studs",dist3d)
+                setp(d.dist,"Color",Color3.fromRGB(220,220,220))
+                setp(d.dist,"Size",12) setp(d.dist,"Center",true)
+                setp(d.dist,"Outline",true) setp(d.dist,"OutlineColor",Color3.new(0,0,0))
+                d.dist.Position=Vector2.new(headSp.X,boxY+boxH+3)
+            else setp(d.dist,"Visible",false) end
+
+            if cfg.showHealth then
+                local hp = math.clamp(hum.Health/hum.MaxHealth,0,1)
+                local hpW=boxW local hpH=4 local hpX=boxX local hpY=boxY+boxH+18
+                setp(d.hpBg,"Visible",true) setp(d.hpBg,"Filled",true)
+                setp(d.hpBg,"Color",Color3.fromRGB(20,20,20))
+                d.hpBg.Size=Vector2.new(hpW,hpH) d.hpBg.Position=Vector2.new(hpX,hpY)
+                setp(d.hpFill,"Visible",true) setp(d.hpFill,"Filled",true)
+                setp(d.hpFill,"Color",hp>0.4 and Color3.fromRGB(60,220,100) or Color3.fromRGB(220,60,60))
+                d.hpFill.Size=Vector2.new(hpW*hp,hpH) d.hpFill.Position=Vector2.new(hpX,hpY)
+            else
+                setp(d.hpBg,"Visible",false) setp(d.hpFill,"Visible",false)
+            end
+        end
+    end
+
+    -- VEHICLE ESP
+    if state.vEnabled then
+        local myTeam = getMyTeam()
+        for vehicle, cache in pairs(state.vehicleCache) do
+            if not vehicle or not vehicle.Parent or not cache.pp or not cache.pp.Parent then
+                local d = state.vehicleDrawings[vehicle] if d then hideDrawings(d) end
+                continue
+            end
+            local skip = false
+            if state.vOnlyEnemy and not cache.isEnemy then skip = true end
+            if state.vHideOwn and myTeam and cache.team == myTeam then skip = true end
+            if skip then
+                local d = state.vehicleDrawings[vehicle] if d then hideDrawings(d) end
+                continue
+            end
+            local pos = cache.pp.Position
+            local toV = pos - camPos
+            if toV:Dot(camLook) < 0 then
+                local d = state.vehicleDrawings[vehicle] if d then hideDrawings(d) end
+                continue
+            end
+            local dist3d = toV.Magnitude
+            if dist3d > state.vMaxDistance then
+                local d = state.vehicleDrawings[vehicle] if d then hideDrawings(d) end
+                continue
+            end
+            local sp, onScreen = cam:WorldToViewportPoint(pos)
+            if not onScreen or sp.X < -400 or sp.X > vpSize.X+400 or sp.Y < -400 or sp.Y > vpSize.Y+400 then
+                local d = state.vehicleDrawings[vehicle] if d then hideDrawings(d) end
+                continue
+            end
+
+            local d = safeDraw(state.vehicleDrawings, vehicle, mkVehDrawings)
+            if not d then continue end
+            local col = cache.isEnemy and col3(state.vColorEnemy) or col3(state.vColorAlly)
+
+            local cf = cache.pp.CFrame
+            local hx,hy,hz = cache.hx, cache.hy, cache.hz
+            local cornersWorld = {
+                cf*Vector3.new(-hx,-hy,-hz), cf*Vector3.new(hx,-hy,-hz),
+                cf*Vector3.new(hx,-hy,hz), cf*Vector3.new(-hx,-hy,hz),
+                cf*Vector3.new(-hx,hy,-hz), cf*Vector3.new(hx,hy,-hz),
+                cf*Vector3.new(hx,hy,hz), cf*Vector3.new(-hx,hy,hz),
+            }
+            local pts = {}
+            for _, cp in ipairs(cornersWorld) do
+                local spc, onc = cam:WorldToViewportPoint(cp)
+                if onc then
+                    table.insert(pts, {x = spc.X, y = spc.Y})
+                end
+            end
+
+            local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+            for _, p in ipairs(pts) do
+                if p.x < minX then minX = p.x end
+                if p.x > maxX then maxX = p.x end
+                if p.y < minY then minY = p.y end
+                if p.y > maxY then maxY = p.y end
+            end
+
+            if state.vShowOutline and #pts >= 3 then
+                local hull = convexHull(pts)
+                local nh = #hull
+                for i = 1, 12 do
+                    local line = d["wire"..i]
+                    if line then
+                        if i <= nh then
+                            local a = hull[i]
+                            local b = hull[(i % nh) + 1]
+                            line.From = Vector2.new(a.x, a.y)
+                            line.To = Vector2.new(b.x, b.y)
+                            line.Color = col
+                            line.Thickness = 2
+                            if not line.Visible then line.Visible = true end
+                        else
+                            if line.Visible then line.Visible = false end
+                        end
+                    end
+                end
+            else
+                for i = 1, 12 do
+                    local line = d["wire"..i]
+                    if line and line.Visible then line.Visible = false end
+                end
+            end
+
+            if state.vShowName and minX ~= math.huge then
+                setp(d.name,"Visible",true) setp(d.name,"Text",vehicle.Name)
+                setp(d.name,"Color",col) setp(d.name,"Size",13)
+                setp(d.name,"Center",true) setp(d.name,"Outline",true)
+                setp(d.name,"OutlineColor",Color3.new(0,0,0))
+                d.name.Position=Vector2.new((minX+maxX)/2, minY-16)
+            else setp(d.name,"Visible",false) end
+
+            if state.vShowDistance and minX ~= math.huge then
+                setp(d.dist,"Visible",true)
+                d.dist.Text=string.format("%.0f studs",dist3d)
+                setp(d.dist,"Color",Color3.fromRGB(220,220,220))
+                setp(d.dist,"Size",12) setp(d.dist,"Center",true)
+                setp(d.dist,"Outline",true) setp(d.dist,"OutlineColor",Color3.new(0,0,0))
+                d.dist.Position=Vector2.new((minX+maxX)/2, maxY+3)
+            else setp(d.dist,"Visible",false) end
+        end
+    end
+
+    -- TRAJECTORY
+    pcall(updateTrajectory, cam, camPos)
+
+    -- DRONE RANGE
+    pcall(updateDroneRange, cam)
+end)
+
+-- ============== CLEANUP ==============
+Players.PlayerRemoving:Connect(function(player)
+    local dt = state.teamDrawings[player]
+    if dt then destroyDrawings(dt) state.teamDrawings[player] = nil end
+    local de = state.enemyDrawings[player]
+    if de then destroyDrawings(de) state.enemyDrawings[player] = nil end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    for player, d in pairs(state.teamDrawings) do destroyDrawings(d) end
+    for player, d in pairs(state.enemyDrawings) do destroyDrawings(d) end
+    state.teamDrawings = {}
+    state.enemyDrawings = {}
+end)
+
+task.spawn(function()
+    while not state.unloaded do
+        task.wait(2)
+        for k,d in pairs(state.vehicleDrawings) do
+            if typeof(k)=="Instance" then
+                if k:IsA("Model") and not k.Parent then
+                    destroyDrawings(d) state.vehicleDrawings[k]=nil
+                end
+            end
+        end
+    end
+end)
+
+-- ============== UI ==============
+makeSectionLabel("PLAYER ESP", "visuals")
+makeSubTabBar({
+    { id="team", label="Команда" },
+    { id="enemy", label="Враги" },
+}, "team")
+
+makeMasterToggle("Player ESP — Команда", false, "visuals", function(on) state.pTeam.enabled = on end, "team")
+makeToggle("Ник над головой", false, "visuals", function(on) state.pTeam.showName = on end, "team")
+makeToggle("Дистанция", false, "visuals", function(on) state.pTeam.showDistance = on end, "team")
+makeToggle("Полоса HP", false, "visuals", function(on) state.pTeam.showHealth = on end, "team")
+makeToggle("Рамка (Box)", false, "visuals", function(on) state.pTeam.showBox = on end, "team")
+makeToggle("Обводка рамки", false, "visuals", function(on) state.pTeam.showOutline = on end, "team")
+makeColorButton("Цвет команды", Color3.fromRGB(60,200,100), "visuals", function(c) state.pTeam.color = c end, "team")
+makeSlider("Макс. дистанция", 50, 3000, 800, "visuals", function(v) state.pTeam.maxDist = v end, 50, "team")
+
+makeMasterToggle("Player ESP — Враги", false, "visuals", function(on) state.pEnemy.enabled = on end, "enemy")
+makeToggle("Ник над головой", false, "visuals", function(on) state.pEnemy.showName = on end, "enemy")
+makeToggle("Дистанция", false, "visuals", function(on) state.pEnemy.showDistance = on end, "enemy")
+makeToggle("Полоса HP", false, "visuals", function(on) state.pEnemy.showHealth = on end, "enemy")
+makeToggle("Рамка (Box)", false, "visuals", function(on) state.pEnemy.showBox = on end, "enemy")
+makeToggle("Обводка рамки", false, "visuals", function(on) state.pEnemy.showOutline = on end, "enemy")
+makeColorButton("Цвет врагов", Color3.fromRGB(255,60,60), "visuals", function(c) state.pEnemy.color = c end, "enemy")
+makeSlider("Макс. дистанция", 50, 3000, 800, "visuals", function(v) state.pEnemy.maxDist = v end, 50, "enemy")
+
+makeSectionLabel("VEHICLE ESP", "visuals")
+makeMasterToggle("Vehicle ESP", false, "visuals", function(on) state.vEnabled = on end)
+makeToggle("Только вражеские", false, "visuals", function(on) state.vOnlyEnemy = on end)
+makeToggle("Скрывать свои", false, "visuals", function(on) state.vHideOwn = on end)
+makeToggle("Название танка", false, "visuals", function(on) state.vShowName = on end)
+makeToggle("Дистанция", false, "visuals", function(on) state.vShowDistance = on end)
+makeToggle("Обводка транспорта (силуэт)", false, "visuals", function(on) state.vShowOutline = on end)
+makeColorButton("Цвет вражеских", Color3.fromRGB(255,60,60), "visuals", function(c) state.vColorEnemy = c end)
+makeColorButton("Цвет союзных", Color3.fromRGB(60,150,255), "visuals", function(c) state.vColorAlly = c end)
+makeSlider("Макс. дистанция", 50, 5000, 1000, "visuals", function(v) state.vMaxDistance = v end, 100)
+
+-- MISC
+makeSectionLabel("ТРАЕКТОРИЯ", "misc")
+makeMasterToggle("Показывать траекторию снаряда", false, "misc", function(on) state.trajEnabled = on end)
+
+local trajHint = Instance.new("TextLabel")
+trajHint.Size = UDim2.new(1, 0, 0, 50)
+trajHint.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
+trajHint.BorderSizePixel = 0
+trajHint.Text = "Скорость снаряда и ствол определяются автоматически. Если не удаётся — используется базовое значение."
+trajHint.TextColor3 = Color3.fromRGB(180, 180, 200)
+trajHint.Font = Enum.Font.Gotham
+trajHint.TextSize = 11
+trajHint.TextWrapped = true
+trajHint.Parent = contentScroll
+trajHint:SetAttribute("Tab", "misc")
+round(trajHint, 6)
+
+makeSectionLabel("ЭФФЕКТЫ ЭКРАНА", "misc")
+makeMasterToggle("Отключить помехи от дрона", false, "misc", function(on)
+    state.antiHissEnabled = on
+    if on then
+        enableAntiHiss()
+    else
+        disableAntiHiss()
+    end
+end)
+
+makeSectionLabel("РАДИУС ДРОНА", "misc")
+makeMasterToggle("Показывать радиус дрона", false, "misc", function(on)
+    state.droneRangeEnabled = on
+    if not on then hideDroneRange() end
+end)
+
+-- MENU
+makeSectionLabel("КЛАВИША МЕНЮ", "menu")
+local keybindBtn = Instance.new("TextButton")
+keybindBtn.Size=UDim2.new(1,0,0,34) keybindBtn.BackgroundColor3=C.row
+keybindBtn.BorderSizePixel=0 keybindBtn.AutoButtonColor=false
+keybindBtn.Text="  Изменить клавишу  ("..state.menuKey.Name..")" keybindBtn.TextColor3=C.text
+keybindBtn.TextXAlignment=Enum.TextXAlignment.Left keybindBtn.Font=Enum.Font.GothamMedium
+keybindBtn.TextSize=12 keybindBtn.Parent=contentScroll
+keybindBtn:SetAttribute("Tab","menu")
+round(keybindBtn, 5)
+attachHoverScale(keybindBtn, 1.02)
+keybindBtn.MouseEnter:Connect(function() keybindBtn.BackgroundColor3=C.rowHover end)
+keybindBtn.MouseLeave:Connect(function() keybindBtn.BackgroundColor3=C.row end)
+local listening = false
+keybindBtn.MouseButton1Click:Connect(function()
+    if listening then return end
+    listening = true
+    keybindBtn.Text = "  Нажмите клавишу..."
+    local conn
+    conn = UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            state.menuKey = input.KeyCode
+            keybindBtn.Text = "  Изменить клавишу  ("..input.KeyCode.Name..")"
+            listening = false
+            conn:Disconnect()
+        end
+    end)
+end)
+
+makeSectionLabel("ЦВЕТ АКЦЕНТА", "menu")
+local accents = {
+    {n="Cyan", c=Color3.fromRGB(0,200,255)}, {n="Purple", c=Color3.fromRGB(170,110,255)},
+    {n="Red", c=Color3.fromRGB(255,80,80)},   {n="Green", c=Color3.fromRGB(80,230,130)},
+    {n="Pink", c=Color3.fromRGB(255,110,200)}, {n="Orange", c=Color3.fromRGB(255,165,30)},
+}
+for _, a in ipairs(accents) do
+    local btn = makeActionButton(a.n, "menu", nil, function()
+        state.configAccent = a.c
+        applyAccentColor(a.c)
+    end)
+    local dot = Instance.new("Frame")
+    dot.Size=UDim2.new(0,14,0,14) dot.Position=UDim2.new(1,-26,0.5,-7)
+    dot.BackgroundColor3=a.c dot.BorderSizePixel=0 dot.Parent=btn
+    round(dot, 7)
+end
+
+makeSectionLabel("ФОН", "menu")
+local _, bgBox = makeTextBox("URL картинки...", "menu", function(text)
+    state.configBgImage = text applyBgImage()
+end)
+makeToggle("Показывать фон", false, "menu", function(on)
+    state.configBgImageEnabled = on applyBgImage()
+end)
+makeSlider("Прозрачность фона", 0, 1, 0.55, "menu", function(v)
+    state.configBgImageTransparency = v bgImage.ImageTransparency = v
+end, 0.05)
+makeActionButton("Убрать фон", "menu", Color3.fromRGB(140,35,35), function()
+    state.configBgImage="" state.configBgImageEnabled=false
+    bgImage.Image="" bgImage.Visible=false content.BackgroundTransparency=0
+    if bgBox then bgBox.Text="" end
+end)
+
+makeSectionLabel("ОБСЛУЖИВАНИЕ", "menu")
+makeActionButton("Сохранить конфиг", "menu", nil, function(btn)
+    saveConfig() btn.Text="  Сохранено!" task.wait(1) btn.Text="  Сохранить конфиг"
+end)
+makeActionButton("Сбросить конфиг", "menu", Color3.fromRGB(140,35,35), function(btn)
+    fsDelete(CONFIG_FILE) btn.Text="  Удалён" task.wait(2) btn.Text="  Сбросить конфиг"
+end)
+
+local unloadBtn = Instance.new("TextButton")
+unloadBtn.Size=UDim2.new(0,130,0,30) unloadBtn.Position=UDim2.new(1,-14,1,-14)
+unloadBtn.AnchorPoint=Vector2.new(1,1) unloadBtn.BackgroundColor3=Color3.fromRGB(140,35,35)
+unloadBtn.BorderSizePixel=0 unloadBtn.AutoButtonColor=false
+unloadBtn.Text="Выгрузить" unloadBtn.TextColor3=Color3.fromRGB(255,220,220)
+unloadBtn.Font=Enum.Font.GothamMedium unloadBtn.TextSize=12 unloadBtn.Parent=main
+round(unloadBtn, 5)
+
+-- APPLY CONFIG
+local function applyLoadedConfig(cfg)
+    if not cfg then return end
+    state.loadingConfig = true
+    if cfg.pTeam then for k,v in pairs(cfg.pTeam) do
+        if k == "color" then local c = colorFromTable(v) if c then state.pTeam.color = c end
+        else state.pTeam[k] = v end
+    end end
+    if cfg.pEnemy then for k,v in pairs(cfg.pEnemy) do
+        if k == "color" then local c = colorFromTable(v) if c then state.pEnemy.color = c end
+        else state.pEnemy[k] = v end
+    end end
+    if cfg.playerTab then state.playerTab = cfg.playerTab end
+    if cfg.vEnabled ~= nil then state.vEnabled = cfg.vEnabled end
+    if cfg.vOnlyEnemy ~= nil then state.vOnlyEnemy = cfg.vOnlyEnemy end
+    if cfg.vHideOwn ~= nil then state.vHideOwn = cfg.vHideOwn end
+    if cfg.vShowName ~= nil then state.vShowName = cfg.vShowName end
+    if cfg.vShowDistance ~= nil then state.vShowDistance = cfg.vShowDistance end
+    if cfg.vShowOutline ~= nil then state.vShowOutline = cfg.vShowOutline end
+    if cfg.vMaxDistance ~= nil then state.vMaxDistance = cfg.vMaxDistance end
+    local vec = colorFromTable(cfg.vColorEnemy) if vec then state.vColorEnemy = vec end
+    local vac = colorFromTable(cfg.vColorAlly) if vac then state.vColorAlly = vac end
+    if cfg.trajEnabled ~= nil then state.trajEnabled = cfg.trajEnabled end
+    if cfg.antiHissEnabled ~= nil then
+        state.antiHissEnabled = cfg.antiHissEnabled
+        if state.antiHissEnabled then enableAntiHiss() end
+    end
+    if cfg.droneRangeEnabled ~= nil then state.droneRangeEnabled = cfg.droneRangeEnabled end
+    if cfg.menuKeyName then
+        local ok, key = pcall(function() return Enum.KeyCode[cfg.menuKeyName] end)
+        if ok and key then state.menuKey = key end
+    end
+    if cfg.configAccent then
+        local c = colorFromTable(cfg.configAccent)
+        if c then state.configAccent = c applyAccentColor(c) end
+    end
+    if cfg.configBgImage then state.configBgImage = cfg.configBgImage end
+    if cfg.configBgImageEnabled ~= nil then state.configBgImageEnabled = cfg.configBgImageEnabled end
+    if cfg.configBgImageTransparency ~= nil then state.configBgImageTransparency = cfg.configBgImageTransparency end
+    applyBgImage()
+    state.loadingConfig = false
+end
+
+-- UNLOAD
+local function unload()
+    if state.unloaded then return end
+    state.unloaded = true
+    pcall(saveConfig)
+    pcall(disableAntiHiss)
+    for _, c in ipairs(state.connections) do pcall(function() c:Disconnect() end) end
+    state.connections = {}
+    if renderConn then renderConn:Disconnect() end
+    for _, d in pairs(state.teamDrawings) do destroyDrawings(d) end
+    for _, d in pairs(state.enemyDrawings) do destroyDrawings(d) end
+    for _, d in pairs(state.vehicleDrawings) do destroyDrawings(d) end
+    for _, l in ipairs(state.trajLines) do pcall(function() l:Remove() end) end
+    if state.trajImpact then pcall(function() state.trajImpact:Remove() end) end
+    if state.droneRangeText then pcall(function() state.droneRangeText:Remove() end) end
+    state.teamDrawings = {} state.enemyDrawings = {} state.vehicleDrawings = {}
+    state.trajLines = {} state.trajImpact = nil
+    state.droneRangeText = nil
+    if screenGui then pcall(function() screenGui:Destroy() end) end
+    _G.brieliVisUnload = nil
+    print("[brieli vis] выгружен")
+end
+unloadBtn.MouseButton1Click:Connect(unload)
+_G.brieliVisUnload = unload
+
+bind(UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == state.menuKey then main.Visible = not main.Visible end
+end))
+
+-- START
+local loadedCfg = loadConfigTable()
+if loadedCfg then
+    task.spawn(function() task.wait(0.3) applyLoadedConfig(loadedCfg) end)
+end
+
+switchTab("visuals")
+for id, b in pairs(subTabButtons) do
+    b.BackgroundColor3 = (id == state.playerTab) and C.tabActive or C.row
+    b.TextColor3 = (id == state.playerTab) and C.accent or C.textDim
+end
+for _, ch in ipairs(contentScroll:GetChildren()) do
+    if ch:IsA("GuiObject") then
+        local st = ch:GetAttribute("SubTab")
+        if st and (st == "team" or st == "enemy") then
+            ch.Visible = (st == state.playerTab)
+        end
+    end
+end
+
+task.spawn(function()
+    while not state.unloaded do
+        task.wait(5)
+        if not state.unloaded and not state.loadingConfig then pcall(saveConfig) end
+    end
+end)
+
+print("[brieli vis] v5 + Anti-Hiss + DroneRange загружен. Правый Shift — меню.")
